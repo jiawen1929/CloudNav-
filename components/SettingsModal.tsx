@@ -15,9 +15,9 @@ interface SettingsModalProps {
   onUpdateLinks: (links: LinkItem[]) => void;
 }
 
-// 辅助函数：生成 SVG Data URI
+// 辅助函数：生成 SVG Data URI 图标 (修复了中文崩溃问题)
 const generateSvgIcon = (text: string, style: 'blue' | 'purple' | 'orange' | 'dark' | 'green') => {
-    const char = (text || 'C').charAt(0).toUpperCase();
+    const char = (text && text.length > 0 ? text.charAt(0) : 'C').toUpperCase();
     let bg = '';
     let fg = 'white';
     
@@ -41,11 +41,17 @@ const generateSvgIcon = (text: string, style: 'blue' | 'purple' | 'orange' | 'da
 
     const svg = `
     <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
-        ${bg.includes('gradient') ? '<defs>' + bg + '</defs><rect width="100%" height="100%" fill="url(#g)"/>' : bg}
+        ${bg.includes('gradient') ? '<defs>' + bg + '</defs><rect width="100%" height="100%" fill="url(#g)" rx="16"/>' : bg.replace('rect', 'rect rx="16"')}
         <text x="50%" y="50%" dy=".35em" fill="${fg}" font-family="Arial, sans-serif" font-weight="bold" font-size="32" text-anchor="middle">${char}</text>
     </svg>`.trim();
 
-    return `data:image/svg+xml;base64,${btoa(svg)}`;
+    try {
+        const encoded = window.btoa(unescape(encodeURIComponent(svg)));
+        return `data:image/svg+xml;base64,${encoded}`;
+    } catch (e) {
+        console.error("SVG Icon Generation Failed", e);
+        return '';
+    }
 };
 
 const SettingsModal: React.FC<SettingsModalProps> = ({ 
@@ -53,12 +59,16 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
 }) => {
   const [activeTab, setActiveTab] = useState<'site' | 'ai' | 'tools' | 'links'>('site');
   const [localConfig, setLocalConfig] = useState<AIConfig>(config);
-  const [localSiteSettings, setLocalSiteSettings] = useState<SiteSettings>(siteSettings);
   
-  // Generated Icons
+  const [localSiteSettings, setLocalSiteSettings] = useState<SiteSettings>(() => ({
+      title: siteSettings?.title || 'CloudNav - 我的导航',
+      navTitle: siteSettings?.navTitle || 'CloudNav',
+      favicon: siteSettings?.favicon || '',
+      cardStyle: siteSettings?.cardStyle || 'detailed'
+  }));
+  
   const [generatedIcons, setGeneratedIcons] = useState<string[]>([]);
   
-  // Bulk Generation State
   const [isProcessing, setIsProcessing] = useState(false);
   const [progress, setProgress] = useState({ current: 0, total: 0 });
   const shouldStopRef = useRef(false);
@@ -79,10 +89,24 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
 
   const [copiedStates, setCopiedStates] = useState<{[key: string]: boolean}>({});
 
+  const updateGeneratedIcons = (text: string) => {
+      const styles: any[] = ['blue', 'purple', 'orange', 'green', 'dark'];
+      const icons = styles.map(s => generateSvgIcon(text, s));
+      setGeneratedIcons(icons);
+  };
+
   useEffect(() => {
     if (isOpen) {
       setLocalConfig(config);
-      setLocalSiteSettings(siteSettings);
+      const safeSettings = {
+          title: siteSettings?.title || 'CloudNav - 我的导航',
+          navTitle: siteSettings?.navTitle || 'CloudNav',
+          favicon: siteSettings?.favicon || '',
+          cardStyle: siteSettings?.cardStyle || 'detailed'
+      };
+      setLocalSiteSettings(safeSettings);
+      updateGeneratedIcons(safeSettings.navTitle);
+
       setIsProcessing(false);
       setProgress({ current: 0, total: 0 });
       shouldStopRef.current = false;
@@ -91,17 +115,8 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
       if (storedToken) setPassword(storedToken);
       setDraggedId(null);
       setFilterCategory('all');
-      
-      // Init generate icons
-      updateGeneratedIcons(siteSettings.navTitle);
     }
   }, [isOpen, config, siteSettings]);
-
-  const updateGeneratedIcons = (text: string) => {
-      const styles: any[] = ['blue', 'purple', 'orange', 'green', 'dark'];
-      const icons = styles.map(s => generateSvgIcon(text, s));
-      setGeneratedIcons(icons);
-  };
 
   const handleChange = (key: keyof AIConfig, value: string) => {
     setLocalConfig(prev => ({ ...prev, [key]: value }));
@@ -122,7 +137,6 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
     onClose();
   };
 
-  // ... (Bulk generation code remains same) ...
   const handleBulkGenerate = async () => {
     if (!localConfig.apiKey) {
         alert("请先配置并保存 API Key");
@@ -158,11 +172,6 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
     }
 
     setIsProcessing(false);
-  };
-
-  const handleStop = () => {
-      shouldStopRef.current = true;
-      setIsProcessing(false);
   };
 
   const handleCopy = (text: string, key: string) => {
@@ -201,28 +210,30 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
       setDraggedId(null);
   };
 
-  // ... (Extension Generators code remains same) ...
-
   const filteredLinks = useMemo(() => {
       if (filterCategory === 'all') return links;
       return links.filter(l => l.categoryId === filterCategory);
   }, [links, filterCategory]);
 
+  // Extension Generators
   const chromeManifest = `{
   "manifest_version": 3,
   "name": "CloudNav Assistant",
-  "version": "3.1",
-  "permissions": ["activeTab"],
+  "version": "1.0",
+  "permissions": ["activeTab", "scripting"],
   "action": {
     "default_popup": "popup.html",
     "default_title": "Save to CloudNav"
+  },
+  "icons": {
+     "128": "https://lucide.dev/favicon.ico" 
   }
 }`;
 
   const firefoxManifest = `{
   "manifest_version": 3,
   "name": "CloudNav Assistant",
-  "version": "3.1",
+  "version": "1.0",
   "permissions": ["activeTab"],
   "browser_specific_settings": {
     "gecko": {
@@ -236,9 +247,94 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
   }
 }`;
 
-  const extManifest = browserType === 'chrome' ? chromeManifest : firefoxManifest;
-  const extPopupHtml = `<!DOCTYPE html><html><head><meta charset="utf-8"></head><body><h3>Save to CloudNav</h3></body></html>`; // Simplified for brevity in this file update
-  const extPopupJs = `const CONFIG = { apiBase: "${domain}", password: "${password}" };`; // Simplified
+  const extPopupHtml = `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    body { width: 300px; font-family: sans-serif; padding: 12px; }
+    h3 { margin: 0 0 10px 0; font-size: 16px; color: #333; }
+    button { width: 100%; padding: 8px; background: #3b82f6; color: white; border: none; border-radius: 6px; cursor: pointer; font-weight: 500; }
+    button:hover { background: #2563eb; }
+    .status { margin-top: 10px; font-size: 12px; text-align: center; color: #666; min-height: 16px; }
+    .page-info { font-size: 12px; color: #64748b; margin-bottom: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; background: #f1f5f9; padding: 6px; border-radius: 4px; }
+  </style>
+</head>
+<body>
+  <h3>CloudNav</h3>
+  <div class="page-info" id="page-title">Loading...</div>
+  <button id="save-btn">保存到 CloudNav</button>
+  <div id="status" class="status"></div>
+  <script src="popup.js"></script>
+</body>
+</html>`;
+
+  const extPopupJs = `const CONFIG = {
+  apiBase: "${domain}",
+  password: "${password}"
+};
+
+document.addEventListener('DOMContentLoaded', async () => {
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    document.getElementById('page-title').textContent = tab.title;
+
+    document.getElementById('save-btn').addEventListener('click', async () => {
+      const status = document.getElementById('status');
+      status.textContent = 'Saving...';
+      
+      try {
+        const res = await fetch(\`\${CONFIG.apiBase}/api/link\`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-auth-password': CONFIG.password
+          },
+          body: JSON.stringify({
+            title: tab.title,
+            url: tab.url,
+            categoryId: '' // Auto-detect
+          })
+        });
+
+        if (res.ok) {
+          const data = await res.json();
+          status.textContent = '已保存！分类: ' + (data.categoryName || '默认');
+          status.style.color = '#16a34a';
+          setTimeout(() => window.close(), 1500);
+        } else {
+          status.textContent = 'Error: ' + res.status;
+          status.style.color = '#dc2626';
+        }
+      } catch (e) {
+        status.textContent = 'Network Error';
+        status.style.color = '#dc2626';
+      }
+    });
+  } catch(e) {
+     document.getElementById('status').textContent = "Extension Error: " + e.message;
+  }
+});`;
+
+  const renderCodeBlock = (filename: string, code: string) => (
+    <div className="rounded-lg border border-slate-200 dark:border-slate-700 overflow-hidden">
+        <div className="flex justify-between items-center bg-slate-50 dark:bg-slate-700/50 px-3 py-2 border-b border-slate-200 dark:border-slate-700">
+            <span className="text-xs font-mono font-medium text-slate-600 dark:text-slate-300">{filename}</span>
+            <button 
+                onClick={() => handleCopy(code, filename)}
+                className="text-xs flex items-center gap-1 text-blue-600 dark:text-blue-400 hover:underline"
+            >
+                {copiedStates[filename] ? <Check size={12}/> : <Copy size={12}/>}
+                {copiedStates[filename] ? 'Copied' : 'Copy'}
+            </button>
+        </div>
+        <div className="bg-slate-900 p-3 overflow-x-auto">
+            <pre className="text-[10px] md:text-xs font-mono text-slate-300 leading-relaxed whitespace-pre">
+                {code}
+            </pre>
+        </div>
+    </div>
+  );
 
   if (!isOpen) return null;
 
@@ -276,10 +372,11 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
                 <div className="space-y-4">
                      <div>
                         <h4 className="font-medium text-slate-800 dark:text-slate-200 mb-1 flex items-center gap-2">
-                           <LayoutTemplate size={16} className="text-blue-500"/> 基础设置
+                           <LayoutTemplate size={16} className="text-blue-500"/> 基础外观
                         </h4>
+                        <p className="text-xs text-slate-500 mb-4">定制您的专属导航站风格</p>
                         
-                        <div className="space-y-4 mt-3">
+                        <div className="space-y-5">
                             <div>
                                 <label className="block text-xs font-medium text-slate-500 mb-1">网页导航名称 (Navbar Name)</label>
                                 <input
@@ -289,7 +386,7 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
                                     placeholder="CloudNav"
                                     className="w-full p-2.5 rounded-lg border border-slate-300 dark:border-slate-600 dark:bg-slate-700 dark:text-white focus:ring-2 focus:ring-blue-500 outline-none transition-all"
                                 />
-                                <p className="text-[10px] text-slate-400 mt-1">显示在网页左上角的名称，将基于此名称生成图标</p>
+                                <p className="text-[10px] text-slate-400 mt-1">网站左上角的名称，将用于生成图标首字母</p>
                             </div>
 
                             <div>
@@ -297,13 +394,16 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
                                 
                                 {/* Generated Icons Selection */}
                                 <div className="mb-3">
-                                    <p className="text-[10px] text-slate-500 mb-2">自动生成 (点击选择):</p>
+                                    <div className="flex items-center gap-2 mb-2">
+                                        <Sparkles size={12} className="text-purple-500"/>
+                                        <p className="text-[10px] text-purple-600 dark:text-purple-400 font-medium">自动生成 (点击应用):</p>
+                                    </div>
                                     <div className="flex gap-3 overflow-x-auto pb-2">
                                         {generatedIcons.map((icon, idx) => (
                                             <button
                                                 key={idx}
                                                 onClick={() => handleSiteChange('favicon', icon)}
-                                                className={`shrink-0 w-10 h-10 rounded-lg overflow-hidden border-2 transition-all ${localSiteSettings.favicon === icon ? 'border-blue-500 ring-2 ring-blue-200' : 'border-transparent hover:border-slate-300'}`}
+                                                className={`shrink-0 w-10 h-10 rounded-xl overflow-hidden border-2 transition-all shadow-sm ${localSiteSettings.favicon === icon ? 'border-blue-500 ring-2 ring-blue-200 dark:ring-blue-900 scale-110' : 'border-transparent hover:border-slate-300 dark:hover:border-slate-600'}`}
                                             >
                                                 <img src={icon} className="w-full h-full object-cover" />
                                             </button>
@@ -312,7 +412,7 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
                                 </div>
 
                                 <div className="flex gap-2">
-                                    <div className="shrink-0 w-10 h-10 rounded-lg border border-slate-200 dark:border-slate-600 bg-slate-50 dark:bg-slate-700 flex items-center justify-center overflow-hidden">
+                                    <div className="shrink-0 w-10 h-10 rounded-xl border border-slate-200 dark:border-slate-600 bg-slate-50 dark:bg-slate-700 flex items-center justify-center overflow-hidden">
                                         {localSiteSettings.favicon ? (
                                             <img src={localSiteSettings.favicon} className="w-full h-full object-contain" onError={(e) => e.currentTarget.style.display='none'} />
                                         ) : (
@@ -323,14 +423,14 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
                                         type="text"
                                         value={localSiteSettings.favicon}
                                         onChange={(e) => handleSiteChange('favicon', e.target.value)}
-                                        placeholder="或输入图片 URL..."
+                                        placeholder="或者输入自定义图片 URL..."
                                         className="flex-1 p-2.5 rounded-lg border border-slate-300 dark:border-slate-600 dark:bg-slate-700 dark:text-white focus:ring-2 focus:ring-blue-500 outline-none transition-all"
                                     />
                                 </div>
                             </div>
                             
                             <div>
-                                <label className="block text-xs font-medium text-slate-500 mb-1">浏览器标题 (Title)</label>
+                                <label className="block text-xs font-medium text-slate-500 mb-1">浏览器标签标题 (Title)</label>
                                 <input
                                     type="text"
                                     value={localSiteSettings.title}
@@ -346,8 +446,8 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
 
             {activeTab === 'ai' && (
                 <>
-                   {/* ... AI content from previous version ... */}
-                   <div>
+                    {/* Provider Selection */}
+                    <div>
                         <label className="block text-sm font-medium mb-2 dark:text-slate-300">API 提供商</label>
                         <div className="grid grid-cols-2 gap-3">
                             <button
@@ -372,7 +472,9 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
                             </button>
                         </div>
                     </div>
-                     <div className="space-y-4">
+
+                    {/* Model Config */}
+                    <div className="space-y-4">
                         <div>
                             <label className="block text-xs font-medium text-slate-500 mb-1 flex items-center gap-1">
                                 <Key size={12}/> API Key
@@ -385,7 +487,22 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
                                 className="w-full p-2.5 rounded-lg border border-slate-300 dark:border-slate-600 dark:bg-slate-700 dark:text-white focus:ring-2 focus:ring-blue-500 outline-none transition-all"
                             />
                         </div>
-                        {/* Simplified for brevity, same fields as before */}
+
+                        {localConfig.provider === 'openai' && (
+                            <div>
+                                <label className="block text-xs font-medium text-slate-500 mb-1 flex items-center gap-1">
+                                    <Globe size={12}/> Base URL (API 地址)
+                                </label>
+                                <input
+                                    type="text"
+                                    value={localConfig.baseUrl}
+                                    onChange={(e) => handleChange('baseUrl', e.target.value)}
+                                    placeholder="https://api.openai.com/v1"
+                                    className="w-full p-2.5 rounded-lg border border-slate-300 dark:border-slate-600 dark:bg-slate-700 dark:text-white focus:ring-2 focus:ring-blue-500 outline-none transition-all"
+                                />
+                            </div>
+                        )}
+
                         <div>
                             <label className="block text-xs font-medium text-slate-500 mb-1 flex items-center gap-1">
                                 <Sparkles size={12}/> 模型名称
@@ -399,19 +516,20 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
                             />
                         </div>
                     </div>
-                     <div className="pt-4 border-t border-slate-200 dark:border-slate-700">
-                         <button
+
+                    {/* Bulk Actions */}
+                    <div className="pt-4 border-t border-slate-200 dark:border-slate-700">
+                        <button
                             onClick={handleBulkGenerate}
                             className="w-full py-2 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-600 hover:border-blue-500 hover:text-blue-500 dark:hover:text-blue-400 dark:text-slate-200 rounded-lg text-sm font-medium transition-colors flex items-center justify-center gap-2"
                         >
                             <Sparkles size={16} /> 一键补全所有描述
                         </button>
-                     </div>
+                    </div>
                 </>
             )}
 
             {activeTab === 'links' && (
-               /* ... Same as before ... */
                 <div className="space-y-4">
                     <div className="flex items-center justify-between">
                          <p className="text-xs text-slate-500">拖拽调整顺序</p>
@@ -431,6 +549,7 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
                              </select>
                          </div>
                     </div>
+
                     <div className="space-y-2 max-h-[400px] overflow-y-auto pr-1">
                         {filteredLinks.map((link) => (
                             <div 
@@ -448,6 +567,10 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
                                 </div>
                                 <div className="flex-1 min-w-0">
                                     <div className="font-medium text-sm truncate dark:text-slate-200">{link.title}</div>
+                                    <div className="text-xs text-slate-400 truncate">{link.url}</div>
+                                </div>
+                                <div className="text-xs text-slate-400 px-2 bg-slate-200 dark:bg-slate-800 rounded">
+                                     {categories.find(c => c.id === link.categoryId)?.name || link.categoryId}
                                 </div>
                             </div>
                         ))}
@@ -456,10 +579,11 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
             )}
 
             {activeTab === 'tools' && (
-                <div className="space-y-4">
+                <div className="space-y-6">
+                    {/* Step 1: Password */}
                     <div className="space-y-3">
                         <label className="block text-xs font-medium text-slate-500 mb-1">
-                            访问密码
+                            第一步：输入访问密码
                         </label>
                         <input
                             type="password"
@@ -469,10 +593,56 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
                             placeholder="部署时设置的 PASSWORD"
                         />
                     </div>
-                    {/* Simplified for response brevity */}
-                    <p className="text-xs text-slate-500">
-                        请使用上方生成的密码和域名配置 Chrome 扩展。
-                    </p>
+                    
+                    {/* Step 2: Browser Selection */}
+                    <div className="space-y-3">
+                        <label className="block text-xs font-medium text-slate-500 mb-1">
+                            第二步：选择浏览器类型
+                        </label>
+                        <div className="flex gap-4">
+                            <label className={`flex-1 flex items-center justify-center gap-2 p-3 rounded-lg border cursor-pointer transition-all ${browserType === 'chrome' ? 'bg-blue-50 border-blue-500 text-blue-700 dark:bg-blue-900/30 dark:border-blue-500 dark:text-blue-300' : 'border-slate-200 dark:border-slate-600 hover:bg-slate-50 dark:hover:bg-slate-700'}`}>
+                                <input type="radio" className="hidden" checked={browserType === 'chrome'} onChange={() => setBrowserType('chrome')} />
+                                <span className="font-semibold text-sm">Chrome / Edge</span>
+                            </label>
+                            <label className={`flex-1 flex items-center justify-center gap-2 p-3 rounded-lg border cursor-pointer transition-all ${browserType === 'firefox' ? 'bg-orange-50 border-orange-500 text-orange-700 dark:bg-orange-900/30 dark:border-orange-500 dark:text-orange-300' : 'border-slate-200 dark:border-slate-600 hover:bg-slate-50 dark:hover:bg-slate-700'}`}>
+                                <input type="radio" className="hidden" checked={browserType === 'firefox'} onChange={() => setBrowserType('firefox')} />
+                                <span className="font-semibold text-sm">Mozilla Firefox</span>
+                            </label>
+                        </div>
+                    </div>
+                    
+                    {/* Step 3: Instructions & Code */}
+                    <div className="space-y-4">
+                        <h4 className="text-sm font-medium dark:text-slate-200 flex items-center gap-2">
+                           <span className="w-5 h-5 rounded-full bg-blue-100 dark:bg-blue-900 text-blue-600 dark:text-blue-400 flex items-center justify-center text-xs">3</span>
+                           配置步骤与代码
+                        </h4>
+                        
+                        <div className="text-xs text-slate-500 bg-slate-50 dark:bg-slate-800/50 p-3 rounded-lg border border-slate-200 dark:border-slate-700 leading-relaxed">
+                            <p className="font-semibold mb-1 text-slate-700 dark:text-slate-300">安装指南 ({browserType === 'chrome' ? 'Chrome/Edge' : 'Firefox'}):</p>
+                            <ol className="list-decimal pl-4 space-y-1">
+                                <li>在电脑上新建一个文件夹，命名为 <code>CloudNav-Ext</code>。</li>
+                                <li>在文件夹中创建以下 3 个文件，分别复制下方的代码粘贴进去。</li>
+                                {browserType === 'chrome' ? (
+                                    <>
+                                        <li>打开浏览器扩展管理页面 (Chrome: <code>chrome://extensions</code>, Edge: <code>edge://extensions</code>)。</li>
+                                        <li>开启右上角的 <strong>"开发者模式"</strong>。</li>
+                                        <li>点击 <strong>"加载已解压的扩展程序"</strong>，选择刚才创建的文件夹。</li>
+                                    </>
+                                ) : (
+                                    <>
+                                        <li>打开 Firefox，输入 <code>about:debugging#/runtime/this-firefox</code>。</li>
+                                        <li>点击 <strong>"临时载入附加组件"</strong>。</li>
+                                        <li>选择文件夹中的 <code>manifest.json</code> 文件。</li>
+                                    </>
+                                )}
+                            </ol>
+                        </div>
+                        
+                        {renderCodeBlock('manifest.json', browserType === 'chrome' ? chromeManifest : firefoxManifest)}
+                        {renderCodeBlock('popup.html', extPopupHtml)}
+                        {renderCodeBlock('popup.js', extPopupJs)}
+                    </div>
                 </div>
             )}
 

@@ -4,7 +4,7 @@ import {
   Search, Plus, Upload, Moon, Sun, Menu, 
   Trash2, Edit2, Loader2, Cloud, CheckCircle2, AlertCircle,
   Pin, Settings, Lock, CloudCog, Github, GitFork, MoreVertical,
-  QrCode, Copy, LayoutGrid, List, Check, ExternalLink
+  QrCode, Copy, LayoutGrid, List, Check, ExternalLink, ArrowRight
 } from 'lucide-react';
 import { 
     LinkItem, Category, DEFAULT_CATEGORIES, INITIAL_LINKS, 
@@ -18,6 +18,7 @@ import BackupModal from './components/BackupModal';
 import CategoryAuthModal from './components/CategoryAuthModal';
 import ImportModal from './components/ImportModal';
 import SettingsModal from './components/SettingsModal';
+import SearchSettingsModal from './components/SearchSettingsModal';
 
 const GITHUB_REPO_URL = 'https://github.com/sese972010/CloudNav-';
 
@@ -25,6 +26,7 @@ const LOCAL_STORAGE_KEY = 'cloudnav_data_cache';
 const AUTH_KEY = 'cloudnav_auth_token';
 const WEBDAV_CONFIG_KEY = 'cloudnav_webdav_config';
 const AI_CONFIG_KEY = 'cloudnav_ai_config';
+const SEARCH_ENGINES_KEY = 'cloudnav_search_engines';
 
 function App() {
   // --- State ---
@@ -32,15 +34,30 @@ function App() {
   const [categories, setCategories] = useState<Category[]>([]);
   const [activeCategory, setActiveCategory] = useState<string>('all'); 
   const [searchQuery, setSearchQuery] = useState('');
-  const [searchEngine, setSearchEngine] = useState<SearchEngine>(DEFAULT_SEARCH_ENGINES[0]);
-  const [showEngineDropdown, setShowEngineDropdown] = useState(false);
+  
+  // New Search State
+  const [searchMode, setSearchMode] = useState<'local' | 'external'>('local');
+  const [externalEngines, setExternalEngines] = useState<SearchEngine[]>(() => {
+      const saved = localStorage.getItem(SEARCH_ENGINES_KEY);
+      if (saved) {
+          try { return JSON.parse(saved); } catch(e) {}
+      }
+      // Filter out 'local' from defaults for the external list
+      return DEFAULT_SEARCH_ENGINES.filter(e => e.id !== 'local');
+  });
+  const [activeEngineId, setActiveEngineId] = useState<string>(() => {
+      return externalEngines[0]?.id || 'google';
+  });
+  const [isSearchSettingsOpen, setIsSearchSettingsOpen] = useState(false);
+
   const [darkMode, setDarkMode] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   
+  // Site Settings - Initialized with defaults to prevent crash
   const [siteSettings, setSiteSettings] = useState<SiteSettings>({
       title: 'CloudNav - 我的导航',
       navTitle: '云航 CloudNav',
-      favicon: '/favicon.ico',
+      favicon: '',
       cardStyle: 'detailed'
   });
   
@@ -67,9 +84,18 @@ function App() {
               return JSON.parse(saved);
           } catch (e) {}
       }
+      
+      // Safe access to process env
+      let defaultKey = '';
+      try {
+          if (typeof process !== 'undefined' && process.env && process.env.API_KEY) {
+              defaultKey = process.env.API_KEY;
+          }
+      } catch(e) {}
+
       return {
           provider: 'gemini',
-          apiKey: process.env.API_KEY || '', 
+          apiKey: defaultKey, 
           baseUrl: '',
           model: 'gemini-2.5-flash'
       };
@@ -103,7 +129,7 @@ function App() {
         const parsed = JSON.parse(stored);
         setLinks(parsed.links || INITIAL_LINKS);
         setCategories(parsed.categories || DEFAULT_CATEGORIES);
-        if (parsed.settings) setSiteSettings(parsed.settings);
+        if (parsed.settings) setSiteSettings(prev => ({ ...prev, ...parsed.settings }));
       } catch (e) {
         setLinks(INITIAL_LINKS);
         setCategories(DEFAULT_CATEGORIES);
@@ -193,7 +219,7 @@ function App() {
                 if (data.links && data.links.length > 0) {
                     setLinks(data.links);
                     setCategories(data.categories || DEFAULT_CATEGORIES);
-                    if (data.settings) setSiteSettings(data.settings);
+                    if (data.settings) setSiteSettings(prev => ({ ...prev, ...data.settings }));
                     localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(data));
                     return;
                 }
@@ -218,8 +244,6 @@ function App() {
   useEffect(() => {
       const handleClickOutside = (e: MouseEvent) => {
           if (openMenuId) setOpenMenuId(null);
-          if (showEngineDropdown) setShowEngineDropdown(false);
-          // Context menu close logic is handled by specific click or global click
           if (contextMenu && contextMenuRef.current && !contextMenuRef.current.contains(e.target as Node)) {
              setContextMenu(null);
           }
@@ -232,7 +256,6 @@ function App() {
       window.addEventListener('click', handleClickOutside);
       window.addEventListener('scroll', handleScroll, true); 
       
-      // Prevent default context menu if ours is open, but only on the menu itself
       const handleGlobalContextMenu = (e: MouseEvent) => {
           if (contextMenu) {
               e.preventDefault();
@@ -246,7 +269,7 @@ function App() {
           window.removeEventListener('scroll', handleScroll, true);
           window.removeEventListener('contextmenu', handleGlobalContextMenu);
       }
-  }, [openMenuId, showEngineDropdown, contextMenu]);
+  }, [openMenuId, contextMenu]);
 
   useEffect(() => {
     const handleScroll = () => {
@@ -420,14 +443,23 @@ function App() {
       setIsBackupModalOpen(false);
   };
   
+  // Updated Search Logic
   const handleSearchSubmit = (e: React.FormEvent) => {
       e.preventDefault();
       if (!searchQuery.trim()) return;
       
-      if (searchEngine.id !== 'local') {
-          window.open(searchEngine.url + encodeURIComponent(searchQuery), '_blank');
-          setSearchQuery('');
+      if (searchMode === 'external') {
+          const engine = externalEngines.find(e => e.id === activeEngineId) || externalEngines[0];
+          if (engine) {
+              window.open(engine.url + encodeURIComponent(searchQuery), '_blank');
+              setSearchQuery('');
+          }
       }
+  };
+
+  const handleUpdateSearchEngines = (newEngines: SearchEngine[]) => {
+      setExternalEngines(newEngines);
+      localStorage.setItem(SEARCH_ENGINES_KEY, JSON.stringify(newEngines));
   };
 
   const isCategoryLocked = (catId: string) => {
@@ -441,9 +473,8 @@ function App() {
   }, [links, categories, unlockedCategoryIds]);
 
   const searchResults = useMemo(() => {
-    // IMPORTANT: If engine is NOT local, we do NOT filter links.
-    // We only filter if engine is 'local'.
-    if (searchEngine.id !== 'local') return links;
+    // Only filter locally if mode is 'local'
+    if (searchMode !== 'local') return links;
 
     let result = links;
     if (searchQuery.trim()) {
@@ -455,7 +486,11 @@ function App() {
       );
     }
     return result;
-  }, [links, searchQuery, searchEngine]);
+  }, [links, searchQuery, searchMode]);
+
+  const activeExternalEngine = useMemo(() => {
+      return externalEngines.find(e => e.id === activeEngineId) || externalEngines[0];
+  }, [externalEngines, activeEngineId]);
 
   // --- Render Components ---
 
@@ -486,8 +521,8 @@ function App() {
                 let x = e.clientX;
                 let y = e.clientY;
                 // Boundary adjustment
-                if (x + 160 > window.innerWidth) x = window.innerWidth - 170;
-                if (y + 200 > window.innerHeight) y = window.innerHeight - 210;
+                if (x + 180 > window.innerWidth) x = window.innerWidth - 190;
+                if (y + 220 > window.innerHeight) y = window.innerHeight - 230;
                 setContextMenu({ x, y, link });
                 return false;
             }}
@@ -605,6 +640,15 @@ function App() {
         links={links}
         categories={categories}
         onUpdateLinks={(newLinks) => updateData(newLinks, categories)}
+      />
+
+      <SearchSettingsModal
+        isOpen={isSearchSettingsOpen}
+        onClose={() => setIsSearchSettingsOpen(false)}
+        engines={externalEngines}
+        activeEngineId={activeEngineId}
+        onUpdateEngines={handleUpdateSearchEngines}
+        onSelectEngine={setActiveEngineId}
       />
 
       {/* Sidebar Mobile Overlay */}
@@ -743,60 +787,67 @@ function App() {
               <Menu size={24} />
             </button>
 
-            {/* Enhanced Search Bar */}
-            <div className="relative w-full max-w-lg hidden sm:block group z-50">
-                <form onSubmit={handleSearchSubmit} className="relative flex items-center w-full rounded-full bg-slate-100 dark:bg-slate-700/50 hover:bg-white dark:hover:bg-slate-700 border border-transparent hover:border-slate-200 dark:hover:border-slate-600 shadow-sm transition-all focus-within:ring-2 focus-within:ring-blue-500 focus-within:bg-white dark:focus-within:bg-slate-700">
-                    {/* Engine Selector */}
-                    <div className="relative">
-                        <button 
-                            type="button"
-                            onClick={() => setShowEngineDropdown(!showEngineDropdown)}
-                            className="flex items-center gap-2 pl-3 pr-2 py-2 text-sm font-medium text-slate-600 dark:text-slate-300 hover:text-blue-600 dark:hover:text-blue-400 border-r border-slate-200 dark:border-slate-600 h-10 rounded-l-full"
-                        >
-                            {searchEngine.id === 'local' ? (
-                                <Search size={16} />
-                            ) : (
-                                <img src={searchEngine.icon} alt="" className="w-4 h-4 rounded-full"/>
-                            )}
-                            <span className="hidden md:inline">{searchEngine.name}</span>
-                        </button>
-                        
-                        {/* Dropdown */}
-                        {showEngineDropdown && (
-                            <div className="absolute top-full left-0 mt-2 w-48 bg-white dark:bg-slate-800 rounded-xl shadow-xl border border-slate-100 dark:border-slate-600 py-2 animate-in fade-in zoom-in duration-200 overflow-hidden">
-                                {DEFAULT_SEARCH_ENGINES.map(engine => (
-                                    <button
-                                        key={engine.id}
-                                        type="button"
-                                        onClick={() => { setSearchEngine(engine); setShowEngineDropdown(false); setSearchQuery(''); searchInputRef.current?.focus(); }}
-                                        className={`w-full flex items-center gap-3 px-4 py-2.5 text-sm transition-colors ${
-                                            searchEngine.id === engine.id 
-                                            ? 'bg-blue-50 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400 font-medium' 
-                                            : 'text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700'
-                                        }`}
-                                    >
-                                        {engine.id === 'local' ? <Search size={16} /> : <img src={engine.icon} className="w-4 h-4 rounded-full"/>}
-                                        {engine.name}
-                                        {searchEngine.id === engine.id && <Check size={14} className="ml-auto" />}
-                                    </button>
-                                ))}
-                            </div>
-                        )}
-                    </div>
+            {/* Redesigned Search Bar */}
+            <div className="relative w-full max-w-xl hidden sm:flex items-center gap-3">
+                {/* Search Mode Toggle (Pill) */}
+                <div className="bg-slate-100 dark:bg-slate-700 p-1 rounded-full flex items-center shrink-0">
+                    <button
+                        onClick={() => setSearchMode('local')}
+                        className={`px-3 py-1.5 text-sm font-medium rounded-full transition-all ${
+                            searchMode === 'local' 
+                            ? 'bg-white dark:bg-slate-600 text-slate-900 dark:text-white shadow-sm' 
+                            : 'text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-300'
+                        }`}
+                    >
+                        站内
+                    </button>
+                    <button
+                        onClick={() => setSearchMode('external')}
+                        className={`px-3 py-1.5 text-sm font-medium rounded-full transition-all ${
+                            searchMode === 'external' 
+                            ? 'bg-white dark:bg-slate-600 text-blue-600 dark:text-blue-400 shadow-sm' 
+                            : 'text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-300'
+                        }`}
+                    >
+                        站外
+                    </button>
+                </div>
 
+                {/* Settings Gear (Visible only for External) */}
+                {searchMode === 'external' && (
+                    <button 
+                        onClick={() => setIsSearchSettingsOpen(true)}
+                        className="p-2 text-slate-400 hover:text-blue-500 hover:bg-slate-100 dark:hover:bg-slate-700 rounded-full transition-colors animate-in fade-in slide-in-from-left-2 duration-200"
+                        title="管理搜索引擎"
+                    >
+                        <Settings size={18} />
+                    </button>
+                )}
+
+                {/* Search Input */}
+                <form onSubmit={handleSearchSubmit} className="flex-1 relative flex items-center group">
                     <input
                         ref={searchInputRef}
                         type="text"
-                        placeholder={searchEngine.id === 'local' ? "搜索书签..." : `在 ${searchEngine.name} 搜索...`}
+                        placeholder={searchMode === 'local' ? "搜索书签..." : `在 ${activeExternalEngine?.name} 搜索...`}
                         value={searchQuery}
                         onChange={(e) => setSearchQuery(e.target.value)}
-                        className="w-full pl-3 pr-4 py-2 bg-transparent border-none text-sm dark:text-white placeholder-slate-400 outline-none"
+                        className="w-full pl-10 pr-4 py-2 bg-slate-100 dark:bg-slate-700/50 hover:bg-white dark:hover:bg-slate-700 border border-transparent hover:border-slate-200 dark:hover:border-slate-600 rounded-full text-sm dark:text-white placeholder-slate-400 outline-none transition-all focus:bg-white dark:focus:bg-slate-700 focus:ring-2 focus:ring-blue-500/50"
                     />
+                    <div className="absolute left-3 text-slate-400 pointer-events-none flex items-center gap-2">
+                        {searchMode === 'local' ? (
+                            <Search size={16} />
+                        ) : activeExternalEngine?.icon?.startsWith('http') ? (
+                            <img src={activeExternalEngine.icon} className="w-4 h-4 rounded-full object-cover" />
+                        ) : (
+                            <Search size={16} />
+                        )}
+                    </div>
                     
-                    {/* Visual Indicator for External Search */}
-                    {searchEngine.id !== 'local' && searchQuery && (
+                    {/* Visual Indicator for Search */}
+                    {searchQuery && (
                         <button type="submit" className="absolute right-2 p-1.5 bg-blue-100 dark:bg-blue-900/40 text-blue-600 rounded-full hover:bg-blue-200 transition-colors">
-                            <ArrowRight size={14} className="lucide-arrow-right" />
+                            <ArrowRight size={14} />
                         </button>
                     )}
                 </form>
@@ -866,7 +917,7 @@ function App() {
                 // Current logic: if search query exists AND local search -> filter. 
                 // If search query exists AND external search -> show all (searchResults returns all).
                 
-                if (searchQuery && searchEngine.id === 'local' && catLinks.length === 0) return null;
+                if (searchQuery && searchMode === 'local' && catLinks.length === 0) return null;
 
                 return (
                     <section key={cat.id} id={`cat-${cat.id}`} className="scroll-mt-24">
@@ -912,7 +963,7 @@ function App() {
             })}
             
             {/* Empty State for Local Search */}
-            {searchQuery && searchEngine.id === 'local' && searchResults.length === 0 && (
+            {searchQuery && searchMode === 'local' && searchResults.length === 0 && (
                 <div className="flex flex-col items-center justify-center py-20 text-slate-400">
                     <Search size={40} className="opacity-30 mb-4" />
                     <p>没有找到相关内容</p>
@@ -936,24 +987,5 @@ function App() {
     </div>
   );
 }
-
-// Add simple arrow right icon for search button
-const ArrowRight = ({ size, className }: { size: number, className?: string }) => (
-    <svg 
-        xmlns="http://www.w3.org/2000/svg" 
-        width={size} 
-        height={size} 
-        viewBox="0 0 24 24" 
-        fill="none" 
-        stroke="currentColor" 
-        strokeWidth="2" 
-        strokeLinecap="round" 
-        strokeLinejoin="round" 
-        className={className}
-    >
-        <path d="M5 12h14" />
-        <path d="m12 5 7 7-7 7" />
-    </svg>
-);
 
 export default App;
