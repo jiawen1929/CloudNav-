@@ -1,6 +1,6 @@
 
 import React, { useState, useEffect, useRef, useMemo } from 'react';
-import { X, Save, Bot, Key, Globe, Sparkles, PauseCircle, Wrench, Box, Copy, Check, List, GripVertical, Filter, LayoutTemplate, RefreshCw, Info, Download } from 'lucide-react';
+import { X, Save, Bot, Key, Globe, Sparkles, PauseCircle, Wrench, Box, Copy, Check, List, GripVertical, Filter, LayoutTemplate, RefreshCw, Info, Download, Sidebar, Keyboard } from 'lucide-react';
 import { AIConfig, LinkItem, Category, SiteSettings } from '../types';
 import { generateLinkDescription } from '../services/geminiService';
 
@@ -225,14 +225,27 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
     const json: any = {
         manifest_version: 3,
         name: localSiteSettings.navTitle || "CloudNav Assistant",
-        version: "1.0",
-        permissions: ["activeTab", "scripting"],
+        version: "1.2",
+        // Added 'storage' permission for caching
+        permissions: ["activeTab", "scripting", "sidePanel", "storage"], 
         action: {
             default_popup: "popup.html",
             default_title: `Save to ${localSiteSettings.navTitle || 'CloudNav'}`
         },
+        side_panel: {
+            default_path: "sidebar.html"
+        },
         icons: {
             "128": "icon.png"
+        },
+        commands: {
+          "_execute_side_panel": {
+            "suggested_key": {
+              "default": "Ctrl+Shift+E",
+              "mac": "Command+Shift+E"
+            },
+            "description": "Open Side Panel"
+          }
         }
     };
     
@@ -285,7 +298,7 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
      <option value="">加载分类中...</option>
   </select>
   
-  <button id="save-btn" disabled>正在连接...</button>
+  <button id="save-btn" disabled>正在初始化...</button>
   
   <div id="status" class="status"></div>
   
@@ -299,12 +312,56 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
   navTitle: "${localSiteSettings.navTitle || 'CloudNav'}"
 };
 
+const CACHE_KEY = 'cloudnav_data';
+
 document.addEventListener('DOMContentLoaded', async () => {
   const statusEl = document.getElementById('status');
   const saveBtn = document.getElementById('save-btn');
   const catSelect = document.getElementById('category-select');
   const titleInput = document.getElementById('page-title');
   const iconImg = document.getElementById('page-icon');
+
+  // Helper to render categories and check duplicates
+  const renderUI = (data, currentTab) => {
+      const categories = data.categories || [];
+      const links = data.links || [];
+
+      // Populate Dropdown
+      catSelect.innerHTML = '';
+      if (categories.length === 0) {
+           const opt = document.createElement('option');
+           opt.value = 'common';
+           opt.textContent = '默认分类';
+           catSelect.appendChild(opt);
+      } else {
+           categories.forEach(c => {
+              const opt = document.createElement('option');
+              opt.value = c.id;
+              opt.textContent = c.name;
+              catSelect.appendChild(opt);
+           });
+      }
+      
+      if (categories.some(c => c.id === 'common')) catSelect.value = 'common';
+
+      // Check Duplicates
+      const normalize = u => u ? u.toLowerCase().trim().replace(/\\/$/, '') : '';
+      const currentUrl = normalize(currentTab.url);
+      const existing = links.find(l => normalize(l.url) === currentUrl);
+
+      if (existing) {
+          const existCat = categories.find(c => c.id === existing.categoryId);
+          const catName = existCat ? existCat.name : '未知分类';
+          statusEl.innerHTML = \`<span style="color:#d97706">⚠️ 链接已存在于 [ \${catName} ]</span>\`;
+          saveBtn.textContent = "更新链接 (再次保存)";
+          saveBtn.style.backgroundColor = "#eab308";
+          if (existing.categoryId) catSelect.value = existing.categoryId;
+      } else {
+          saveBtn.textContent = "保存到 " + CONFIG.navTitle;
+          saveBtn.style.backgroundColor = "#3b82f6";
+      }
+      saveBtn.disabled = false;
+  };
 
   try {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -316,71 +373,36 @@ document.addEventListener('DOMContentLoaded', async () => {
        iconImg.style.display = 'block';
     }
 
-    // 2. Fetch Categories & Check Duplicates
+    // 2. Load Data (Cache First Strategy)
     try {
-        const res = await fetch(\`\${CONFIG.apiBase}/api/storage\`, {
-            method: 'GET',
-            headers: { 'x-auth-password': CONFIG.password }
-        });
-        
-        if (!res.ok) throw new Error('Connect Error');
-        
-        const data = await res.json();
-        const categories = data.categories || [];
-        const links = data.links || [];
-
-        // Populate Dropdown
-        catSelect.innerHTML = '';
-        if (categories.length === 0) {
-             const opt = document.createElement('option');
-             opt.value = 'common';
-             opt.textContent = '默认分类';
-             catSelect.appendChild(opt);
+        // Step A: Check Local Storage
+        const cached = await chrome.storage.local.get(CACHE_KEY);
+        if (cached[CACHE_KEY]) {
+            console.log("Loaded from cache");
+            renderUI(cached[CACHE_KEY], tab);
+            // Optional: Background refresh could go here if needed, but we'll stick to cache for speed
         } else {
-             categories.forEach(c => {
-                const opt = document.createElement('option');
-                opt.value = c.id;
-                opt.textContent = c.name;
-                catSelect.appendChild(opt);
-             });
-        }
-        
-        // Select 'common' by default if available
-        if (categories.some(c => c.id === 'common')) {
-            catSelect.value = 'common';
-        }
-
-        // Check for duplicates (Duplicate Detection)
-        const normalize = u => u ? u.toLowerCase().trim().replace(/\\/$/, '') : '';
-        const currentUrl = normalize(tab.url);
-        const existing = links.find(l => normalize(l.url) === currentUrl);
-
-        if (existing) {
-            const existCat = categories.find(c => c.id === existing.categoryId);
-            const catName = existCat ? existCat.name : '未知分类';
+            // Step B: Fetch from Network if no cache
+            saveBtn.textContent = "正在连接...";
+            const res = await fetch(\`\${CONFIG.apiBase}/api/storage\`, {
+                method: 'GET',
+                headers: { 'x-auth-password': CONFIG.password }
+            });
+            if (!res.ok) throw new Error('Connect Error');
+            const data = await res.json();
             
-            // Show warning
-            statusEl.innerHTML = \`<span style="color:#d97706">⚠️ 链接已存在于 [ \${catName} ]</span>\`;
-            saveBtn.textContent = "更新链接 (再次保存)";
-            saveBtn.style.backgroundColor = "#eab308"; // Amber for update
-            
-            // Auto-select existing category
-            if (existing.categoryId) catSelect.value = existing.categoryId;
-        } else {
-            saveBtn.textContent = "保存到 " + CONFIG.navTitle;
+            // Save to cache
+            await chrome.storage.local.set({ [CACHE_KEY]: data });
+            renderUI(data, tab);
         }
-
-        saveBtn.disabled = false;
 
     } catch (e) {
         console.error(e);
-        statusEl.textContent = "连接服务器失败，请检查密码或网络";
-        statusEl.style.color = '#ef4444';
-        
-        // Allow fallback save attempt even if load fails
-        catSelect.innerHTML = '<option value="">加载失败 (尝试默认)</option>';
+        // Fallback UI
+        catSelect.innerHTML = '<option value="common">默认分类 (离线)</option>';
         saveBtn.textContent = "尝试保存";
         saveBtn.disabled = false;
+        statusEl.textContent = "无法加载数据，将使用默认分类";
     }
 
     // 3. Save Handler
@@ -398,7 +420,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             'x-auth-password': CONFIG.password
           },
           body: JSON.stringify({
-            title: titleInput.value, // Changed to use input value
+            title: titleInput.value,
             url: tab.url,
             icon: tab.favIconUrl || '',
             categoryId: catSelect.value
@@ -406,27 +428,220 @@ document.addEventListener('DOMContentLoaded', async () => {
         });
 
         if (res.ok) {
-          const data = await res.json();
-          statusEl.textContent = '✅ 已保存到: ' + (data.categoryName || '默认');
+          const responseData = await res.json();
+          statusEl.textContent = '✅ 已保存!';
           statusEl.style.color = '#16a34a';
           saveBtn.textContent = '保存成功';
-          setTimeout(() => window.close(), 1200);
+
+          // Update Local Cache manually to reflect the new link immediately
+          const cached = await chrome.storage.local.get(CACHE_KEY);
+          if (cached[CACHE_KEY]) {
+              const newData = cached[CACHE_KEY];
+              // Add new link to top
+              if (responseData.link) {
+                  // Remove if exists (update)
+                  newData.links = newData.links.filter(l => l.url !== responseData.link.url);
+                  newData.links.unshift(responseData.link);
+                  await chrome.storage.local.set({ [CACHE_KEY]: newData });
+              }
+          } else {
+              // If no cache, force fetch next time
+          }
+
+          setTimeout(() => window.close(), 1000);
         } else {
-          statusEl.textContent = 'Error: ' + res.status;
-          statusEl.style.color = '#dc2626';
-          saveBtn.disabled = false;
-          saveBtn.textContent = originalText;
+          throw new Error(res.status);
         }
       } catch (e) {
-        statusEl.textContent = 'Network Error';
+        statusEl.textContent = '同步失败';
         statusEl.style.color = '#dc2626';
         saveBtn.disabled = false;
         saveBtn.textContent = originalText;
       }
     });
   } catch(e) {
-     statusEl.textContent = "Extension Error: " + e.message;
+     statusEl.textContent = "Ext Error: " + e.message;
   }
+});`;
+
+  const extSidebarHtml = `<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <style>
+        :root {
+            --bg: #ffffff;
+            --text: #1e293b;
+            --border: #e2e8f0;
+            --hover: #f1f5f9;
+            --accent: #3b82f6;
+            --muted: #64748b;
+        }
+        @media (prefers-color-scheme: dark) {
+            :root {
+                --bg: #0f172a;
+                --text: #f1f5f9;
+                --border: #334155;
+                --hover: #1e293b;
+                --accent: #60a5fa;
+                --muted: #94a3b8;
+            }
+        }
+        body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: var(--bg); color: var(--text); padding-bottom: 20px; }
+        
+        /* Search Bar */
+        .header { position: sticky; top: 0; padding: 12px; background: var(--bg); border-bottom: 1px solid var(--border); z-index: 10; display: flex; gap: 8px; }
+        .search-input { flex: 1; padding: 8px 12px; border-radius: 8px; border: 1px solid var(--border); background: var(--hover); color: var(--text); outline: none; box-sizing: border-box; font-size: 14px; }
+        .search-input:focus { border-color: var(--accent); }
+        
+        .refresh-btn { width: 34px; display: flex; items-center; justify-content: center; border: 1px solid var(--border); background: var(--hover); border-radius: 8px; color: var(--muted); cursor: pointer; transition: all 0.2s; }
+        .refresh-btn:hover { color: var(--accent); border-color: var(--accent); }
+        .refresh-btn:active { transform: scale(0.95); }
+        .rotating { animation: spin 1s linear infinite; }
+        
+        @keyframes spin { 100% { transform: rotate(360deg); } }
+
+        /* Links List */
+        .content { padding: 8px; }
+        .cat-header { font-size: 12px; font-weight: 700; color: var(--muted); text-transform: uppercase; margin: 16px 8px 8px 8px; letter-spacing: 0.05em; display: flex; items-center; gap: 6px; }
+        .cat-icon { width: 14px; height: 14px; opacity: 0.7; }
+        
+        .link-item { display: flex; items-center; gap: 10px; padding: 8px; border-radius: 8px; text-decoration: none; color: var(--text); transition: background 0.1s; }
+        .link-item:hover { background: var(--hover); }
+        
+        .link-icon { width: 24px; height: 24px; border-radius: 6px; background: var(--hover); display: flex; items-center; justify-content: center; font-size: 12px; font-weight: bold; overflow: hidden; flex-shrink: 0; color: var(--accent); }
+        .link-icon img { width: 100%; height: 100%; object-fit: cover; }
+        
+        .link-info { min-width: 0; flex: 1; }
+        .link-title { font-size: 13px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .link-desc { font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 2px; }
+
+        .empty { text-align: center; padding: 20px; color: var(--muted); font-size: 13px; }
+        .loading { display: flex; justify-content: center; padding: 40px; color: var(--accent); }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <input type="text" id="search" class="search-input" placeholder="搜索书签..." autocomplete="off">
+        <button id="refresh" class="refresh-btn" title="同步最新数据">
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/></svg>
+        </button>
+    </div>
+    <div id="content" class="content">
+        <div class="loading">初始化...</div>
+    </div>
+    <script src="sidebar.js"></script>
+</body>
+</html>`;
+
+  const extSidebarJs = `const CONFIG = {
+  apiBase: "${domain}",
+  password: "${password}"
+};
+const CACHE_KEY = 'cloudnav_data';
+
+document.addEventListener('DOMContentLoaded', async () => {
+    const container = document.getElementById('content');
+    const searchInput = document.getElementById('search');
+    const refreshBtn = document.getElementById('refresh');
+    
+    let allLinks = [];
+    let allCategories = [];
+
+    // Helper: SVG Icons
+    const getCatIcon = () => {
+        return '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="cat-icon"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.93a2 2 0 0 1-1.66-.9l-.82-1.2A2 2 0 0 0 7.93 2H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/></svg>';
+    };
+
+    const render = (filter = '') => {
+        const q = filter.toLowerCase();
+        let html = '';
+        let hasContent = false;
+
+        allCategories.forEach(cat => {
+            const catLinks = allLinks.filter(l => {
+                const inCat = l.categoryId === cat.id;
+                if (!inCat) return false;
+                if (!q) return true;
+                return l.title.toLowerCase().includes(q) || 
+                       l.url.toLowerCase().includes(q) || 
+                       (l.description && l.description.toLowerCase().includes(q));
+            });
+
+            if (catLinks.length === 0) return;
+            hasContent = true;
+
+            html += \`<div class="cat-header">\${getCatIcon()} \${cat.name}</div>\`;
+            
+            catLinks.forEach(link => {
+                const iconHtml = link.icon && link.icon.startsWith('http') 
+                    ? \`<img src="\${link.icon}" />\` 
+                    : link.title.charAt(0);
+                
+                html += \`
+                    <a href="\${link.url}" target="_blank" class="link-item">
+                        <div class="link-icon">\${iconHtml}</div>
+                        <div class="link-info">
+                            <div class="link-title">\${link.title}</div>
+                            \${link.description ? \`<div class="link-desc">\${link.description}</div>\` : ''}
+                        </div>
+                    </a>
+                \`;
+            });
+        });
+
+        if (!hasContent) {
+            container.innerHTML = filter ? '<div class="empty">无搜索结果</div>' : '<div class="empty">暂无数据</div>';
+        } else {
+            container.innerHTML = html;
+        }
+    };
+
+    const loadData = async (forceRefresh = false) => {
+        try {
+            // 1. Check Cache first (if not forcing)
+            if (!forceRefresh) {
+                const cached = await chrome.storage.local.get(CACHE_KEY);
+                if (cached[CACHE_KEY]) {
+                    const data = cached[CACHE_KEY];
+                    allLinks = data.links || [];
+                    allCategories = data.categories || [];
+                    render(searchInput.value);
+                    return;
+                }
+            }
+
+            // 2. Fetch from Network
+            refreshBtn.classList.add('rotating');
+            container.innerHTML = '<div class="loading">同步数据中...</div>';
+            
+            const res = await fetch(\`\${CONFIG.apiBase}/api/storage\`, {
+                headers: { 'x-auth-password': CONFIG.password }
+            });
+            
+            if (!res.ok) throw new Error("Sync failed");
+            
+            const data = await res.json();
+            allLinks = data.links || [];
+            allCategories = data.categories || [];
+            
+            // 3. Save to Cache
+            await chrome.storage.local.set({ [CACHE_KEY]: data });
+            
+            render(searchInput.value);
+        } catch (e) {
+            container.innerHTML = \`<div class="empty" style="color:#ef4444">加载失败: \${e.message}<br>请点击右上角刷新</div>\`;
+        } finally {
+            refreshBtn.classList.remove('rotating');
+        }
+    };
+
+    // Initial Load
+    loadData();
+
+    // Listeners
+    searchInput.addEventListener('input', (e) => render(e.target.value));
+    refreshBtn.addEventListener('click', () => loadData(true));
 });`;
 
   const renderCodeBlock = (filename: string, code: string) => (
@@ -810,19 +1025,20 @@ document.addEventListener('DOMContentLoaded', async () => {
                                     安装指南 ({browserType === 'chrome' ? 'Chrome/Edge' : 'Firefox'}):
                                 </h5>
                                 <ol className="list-decimal list-inside text-sm text-slate-600 dark:text-slate-400 space-y-2 leading-relaxed">
-                                    <li>在电脑上新建一个文件夹，命名为 <code className="bg-white dark:bg-slate-900 px-1.5 py-0.5 rounded border border-slate-200 dark:border-slate-700 font-mono text-xs">CloudNav-Ext</code>。</li>
-                                    <li><strong>[重要]</strong> 将下方的图标保存到该文件夹中，必须命名为 <code className="bg-white dark:bg-slate-900 px-1.5 py-0.5 rounded border border-slate-200 dark:border-slate-700 font-mono text-xs">icon.png</code>。</li>
-                                    <li>在文件夹中创建以下 3 个文本文件，分别复制下方的代码粘贴进去。</li>
+                                    <li>在电脑上新建文件夹 <code className="bg-white dark:bg-slate-900 px-1.5 py-0.5 rounded border border-slate-200 dark:border-slate-700 font-mono text-xs">CloudNav-Ext</code>。</li>
+                                    <li><strong>[重要]</strong> 将下方图标保存为 <code className="bg-white dark:bg-slate-900 px-1.5 py-0.5 rounded border border-slate-200 dark:border-slate-700 font-mono text-xs">icon.png</code>。</li>
+                                    <li>在文件夹中创建以下 5 个文件，分别复制下方代码。</li>
                                     <li>
                                         打开浏览器扩展管理页面 
                                         {browserType === 'chrome' ? (
-                                            <> (Chrome: <code className="select-all bg-white dark:bg-slate-900 px-1 rounded">chrome://extensions</code>, Edge: <code className="select-all bg-white dark:bg-slate-900 px-1 rounded">edge://extensions</code>)</>
+                                            <> (Chrome: <code className="select-all bg-white dark:bg-slate-900 px-1 rounded">chrome://extensions</code>)</>
                                         ) : (
                                             <> (Firefox: <code className="select-all bg-white dark:bg-slate-900 px-1 rounded">about:debugging</code>)</>
                                         )}。
                                     </li>
-                                    {browserType === 'chrome' && <li>开启右上角的 "<strong>开发者模式</strong>"。</li>}
-                                    <li>点击 "<strong>{browserType === 'chrome' ? '加载已解压的扩展程序' : '临时载入附加组件'}</strong>"，选择刚才创建的文件夹。</li>
+                                    {browserType === 'chrome' && <li>开启 "<strong>开发者模式</strong>"。</li>}
+                                    <li>点击 "<strong>加载已解压的扩展程序</strong>"，选择该文件夹。</li>
+                                    <li><strong className="text-blue-600 dark:text-blue-400">新功能:</strong> 按下 <code className="bg-white dark:bg-slate-900 px-1.5 py-0.5 rounded border border-slate-200 dark:border-slate-700 font-mono text-xs">Ctrl+Shift+E</code> 即可呼出侧边栏导航！</li>
                                 </ol>
                             </div>
 
@@ -845,9 +1061,22 @@ document.addEventListener('DOMContentLoaded', async () => {
                             </div>
 
                             <div className="space-y-4">
+                                <div className="flex items-center gap-2 text-sm font-medium text-slate-800 dark:text-slate-200 pt-2 border-t border-slate-100 dark:border-slate-700">
+                                    <Sidebar size={18} className="text-purple-500"/> 核心配置
+                                </div>
                                 {renderCodeBlock('manifest.json', getManifestJson())}
+                                
+                                <div className="flex items-center gap-2 text-sm font-medium text-slate-800 dark:text-slate-200 pt-2 border-t border-slate-100 dark:border-slate-700">
+                                    <Save size={18} className="text-blue-500"/> 弹窗保存功能 (Popup)
+                                </div>
                                 {renderCodeBlock('popup.html', extPopupHtml)}
                                 {renderCodeBlock('popup.js', extPopupJs)}
+
+                                <div className="flex items-center gap-2 text-sm font-medium text-slate-800 dark:text-slate-200 pt-2 border-t border-slate-100 dark:border-slate-700">
+                                    <Keyboard size={18} className="text-green-500"/> 侧边栏导航功能 (Sidebar)
+                                </div>
+                                {renderCodeBlock('sidebar.html', extSidebarHtml)}
+                                {renderCodeBlock('sidebar.js', extSidebarJs)}
                             </div>
                         </div>
                     </div>
